@@ -126,6 +126,69 @@ app.get('/api/content', (req, res) => {
 });
 
 // ✅ Add new content - SAVE TO FILE
+// ✅ ADD THIS MISSING ENDPOINT - Add new content
+app.post('/api/content', upload.single('image'), (req, res) => {
+  try {
+    console.log('Request body:', req.body);
+    console.log('Request file:', req.file);
+
+    const { title, description } = req.body;
+    
+    if (!title || !description) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title and description are required'
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'Image is required'
+      });
+    }
+
+    // Read current content from file
+    const currentContent = readContentFromFile();
+
+    // Use your computer's IP for image URLs
+    const newItem = {
+      id: uuidv4(),
+      title,
+      description,
+      imageUrl: `http://10.185.32.235:${PORT}/uploads/${req.file.filename}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    // Add new item to beginning of array
+    const updatedContent = [newItem, ...currentContent];
+
+    // Save to file
+    const writeSuccess = writeContentToFile(updatedContent);
+
+    if (!writeSuccess) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to save content to storage'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Content added successfully!',
+      data: newItem
+    });
+
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error: ' + error.message
+    });
+  }
+});
+
 // ✅ Fix ALL image URLs (run this once)
 app.get('/api/fix-all-images', (req, res) => {
   try {
