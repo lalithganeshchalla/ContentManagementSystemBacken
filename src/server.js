@@ -6,7 +6,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const PORT = 2148;
+const PORT = process.env.PORT || 2148;
 
 app.use(cors());
 app.use(express.json());
@@ -104,6 +104,21 @@ app.use((error, req, res, next) => {
   next();
 });
 
+// ✅ Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: '🚀 CMS Backend API is running!',
+    version: '1.0.0',
+    endpoints: {
+      health: '/api/health',
+      content: '/api/content',
+      uploads: '/uploads'
+    },
+    documentation: 'Use /api/health to check server status'
+  });
+});
+
 // ✅ Health check endpoint
 app.get('/api/health', (req, res) => {
   const content = readContentFromFile();
@@ -112,21 +127,41 @@ app.get('/api/health', (req, res) => {
     message: 'Server is running with permanent storage',
     timestamp: new Date().toISOString(),
     totalItems: content.length,
-    port: PORT
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
 // ✅ Get all content - FROM FILE
 app.get('/api/content', (req, res) => {
-  const content = readContentFromFile();
-  res.json({
-    success: true,
-    data: content
-  });
+  try {
+    const content = readContentFromFile();
+    
+    // ✅ FIX: Ensure image URLs are properly formatted for production
+    const contentWithFixedUrls = content.map(item => {
+      if (item.imageUrl && !item.imageUrl.startsWith('http')) {
+        // Convert relative paths to absolute URLs
+        return {
+          ...item,
+          imageUrl: `${req.protocol}://${req.get('host')}${item.imageUrl}`
+        };
+      }
+      return item;
+    });
+
+    res.json({
+      success: true,
+      data: contentWithFixedUrls,
+      count: contentWithFixedUrls.length
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching content: ' + error.message
+    });
+  }
 });
 
-// ✅ Add new content - SAVE TO FILE
-// ✅ ADD THIS MISSING ENDPOINT - Add new content
+// ✅ Add new content - SAVE TO FILE (FIXED IMAGE URLS)
 app.post('/api/content', upload.single('image'), (req, res) => {
   try {
     console.log('Request body:', req.body);
@@ -151,12 +186,13 @@ app.post('/api/content', upload.single('image'), (req, res) => {
     // Read current content from file
     const currentContent = readContentFromFile();
 
-    // Use your computer's IP for image URLs
+    // ✅ FIX: Use proper URL format for deployed environment
     const newItem = {
       id: uuidv4(),
-      title,
-      description,
-      imageUrl: `http://10.185.32.235:${PORT}/uploads/${req.file.filename}`,
+      title: title.trim(),
+      description: description.trim(),
+      // ✅ CORRECT: Use relative path that will be converted in GET endpoint
+      imageUrl: `/uploads/${req.file.filename}`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -174,10 +210,16 @@ app.post('/api/content', upload.single('image'), (req, res) => {
       });
     }
 
+    // ✅ Return the item with proper image URL for immediate use
+    const responseItem = {
+      ...newItem,
+      imageUrl: `${req.protocol}://${req.get('host')}${newItem.imageUrl}`
+    };
+
     res.json({
       success: true,
       message: 'Content added successfully!',
-      data: newItem
+      data: responseItem
     });
 
   } catch (error) {
@@ -189,21 +231,24 @@ app.post('/api/content', upload.single('image'), (req, res) => {
   }
 });
 
-// ✅ Fix ALL image URLs (run this once)
-app.get('/api/fix-all-images', (req, res) => {
+// ✅ Fix ALL existing image URLs (run this once)
+app.post('/api/fix-image-urls', (req, res) => {
   try {
     const content = readContentFromFile();
-    console.log('Fixing images in', content.length, 'items');
+    console.log('Fixing image URLs for', content.length, 'items');
     
+    let fixedCount = 0;
     const fixedContent = content.map(item => {
       if (item.imageUrl) {
-        // Replace localhost with your IP
-        const fixedUrl = item.imageUrl.replace('localhost', '10.185.32.235');
-        console.log('Fixed:', item.imageUrl, '→', fixedUrl);
-        return {
-          ...item,
-          imageUrl: fixedUrl
-        };
+        // If it contains local IP, convert to relative path
+        if (item.imageUrl.includes('10.185.32.235') || item.imageUrl.includes('localhost')) {
+          const filename = item.imageUrl.split('/').pop();
+          fixedCount++;
+          return {
+            ...item,
+            imageUrl: `/uploads/${filename}`
+          };
+        }
       }
       return item;
     });
@@ -213,7 +258,7 @@ app.get('/api/fix-all-images', (req, res) => {
     if (writeSuccess) {
       res.json({
         success: true,
-        message: `Fixed ${content.length} image URLs!`,
+        message: `Fixed ${fixedCount} image URLs!`,
         data: fixedContent
       });
     } else {
@@ -232,88 +277,183 @@ app.get('/api/fix-all-images', (req, res) => {
 
 // ✅ Delete content - UPDATE FILE
 app.delete('/api/content/:id', (req, res) => {
-  const { id } = req.params;
-  
-  // Read current content from file
-  const currentContent = readContentFromFile();
-  const initialLength = currentContent.length;
-  
-  const updatedContent = currentContent.filter(item => item.id.toString() !== id.toString());
-  
-  if (updatedContent.length === initialLength) {
-    return res.status(404).json({
+  try {
+    const { id } = req.params;
+    
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Content ID is required'
+      });
+    }
+
+    // Read current content from file
+    const currentContent = readContentFromFile();
+    const initialLength = currentContent.length;
+    
+    const updatedContent = currentContent.filter(item => item.id.toString() !== id.toString());
+    
+    if (updatedContent.length === initialLength) {
+      return res.status(404).json({
+        success: false,
+        message: 'Content not found'
+      });
+    }
+
+    // Save updated content to file
+    const writeSuccess = writeContentToFile(updatedContent);
+
+    if (!writeSuccess) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update storage after deletion'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Content deleted permanently!',
+      deletedId: id
+    });
+  } catch (error) {
+    res.status(500).json({
       success: false,
-      message: 'Content not found'
+      message: 'Error deleting content: ' + error.message
     });
   }
-
-  // Save updated content to file
-  const writeSuccess = writeContentToFile(updatedContent);
-
-  if (!writeSuccess) {
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update storage after deletion'
-    });
-  }
-
-  res.json({
-    success: true,
-    message: 'Content deleted permanently!'
-  });
 });
 
 // ✅ Reset to sample data (optional endpoint)
 app.post('/api/reset', (req, res) => {
-  const sampleData = [
-    {
-      id: '1',
-      title: 'Welcome to Content Management',
-      description: 'This is permanent sample content. Your data survives server restarts!',
-      imageUrl: null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+  try {
+    const sampleData = [
+      {
+        id: '1',
+        title: 'Welcome to Content Management System',
+        description: 'This is permanent sample content. Your data survives server restarts!',
+        imageUrl: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+    ];
+    
+    const writeSuccess = writeContentToFile(sampleData);
+    
+    if (writeSuccess) {
+      res.json({
+        success: true,
+        message: 'Reset to sample data successfully!',
+        data: sampleData
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to reset data'
+      });
     }
-  ];
-  
-  const writeSuccess = writeContentToFile(sampleData);
-  
-  if (writeSuccess) {
-    res.json({
-      success: true,
-      message: 'Reset to sample data successfully!'
-    });
-  } else {
+  } catch (error) {
     res.status(500).json({
       success: false,
-      message: 'Failed to reset data'
+      message: 'Error resetting data: ' + error.message
     });
   }
 });
 
 // ✅ Get storage info
 app.get('/api/storage-info', (req, res) => {
-  const content = readContentFromFile();
-  const stats = fs.statSync(DATA_FILE);
-  
-  res.json({
-    success: true,
-    data: {
-      totalItems: content.length,
-      fileSize: `${(stats.size / 1024).toFixed(2)} KB`,
-      storageFile: DATA_FILE,
-      lastModified: stats.mtime
+  try {
+    const content = readContentFromFile();
+    const stats = fs.statSync(DATA_FILE);
+    
+    res.json({
+      success: true,
+      data: {
+        totalItems: content.length,
+        fileSize: `${(stats.size / 1024).toFixed(2)} KB`,
+        storageFile: DATA_FILE,
+        lastModified: stats.mtime,
+        serverTime: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error getting storage info: ' + error.message
+    });
+  }
+});
+
+// ✅ Get single content item by ID
+app.get('/api/content/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const content = readContentFromFile();
+    const item = content.find(item => item.id.toString() === id.toString());
+    
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Content not found'
+      });
     }
+
+    // Ensure proper image URL
+    const itemWithFixedUrl = {
+      ...item,
+      imageUrl: item.imageUrl && !item.imageUrl.startsWith('http') 
+        ? `${req.protocol}://${req.get('host')}${item.imageUrl}`
+        : item.imageUrl
+    };
+
+    res.json({
+      success: true,
+      data: itemWithFixedUrl
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching content: ' + error.message
+    });
+  }
+});
+
+// ✅ 404 handler for undefined routes
+app.use('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: `Route not found: ${req.method} ${req.originalUrl}`,
+    availableEndpoints: {
+      GET: ['/', '/api/health', '/api/content', '/api/content/:id', '/api/storage-info'],
+      POST: ['/api/content', '/api/fix-image-urls', '/api/reset'],
+      DELETE: ['/api/content/:id']
+    }
+  });
+});
+
+// ✅ Global error handler
+app.use((error, req, res, next) => {
+  console.error('Unhandled error:', error);
+  res.status(500).json({
+    success: false,
+    message: 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
   });
 });
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   const content = readContentFromFile();
-  console.log(`🎯 Backend Server running with PERMANENT STORAGE!`);
-  console.log(`📍 URL: http://localhost:${PORT}`);
-  console.log(`📁 API: http://localhost:${PORT}/api/content`);
+  console.log(`🎯 CMS Backend Server running with PERMANENT STORAGE!`);
+  console.log(`📍 Port: ${PORT}`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`📁 API Base: http://localhost:${PORT}/api`);
   console.log(`📁 Uploads: http://localhost:${PORT}/uploads`);
   console.log(`💾 Storage: ${DATA_FILE} (${content.length} items loaded)`);
-  console.log(`🔧 Endpoints: /api/health, /api/storage-info, /api/reset`);
+  console.log(`🔧 Available Endpoints:`);
+  console.log(`   GET  /api/health          - Health check`);
+  console.log(`   GET  /api/content         - Get all content`);
+  console.log(`   POST /api/content         - Add new content`);
+  console.log(`   DELETE /api/content/:id   - Delete content`);
+  console.log(`   POST /api/fix-image-urls  - Fix existing image URLs`);
+  console.log(`   GET  /api/storage-info    - Storage information`);
 });
