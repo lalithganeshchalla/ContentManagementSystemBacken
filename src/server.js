@@ -9,8 +9,8 @@ const app = express();
 const PORT = process.env.PORT || 2148;
 
 app.use(cors());
-app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ✅ PERMANENT STORAGE: JSON file for content
 const DATA_FILE = 'content-data.json';
@@ -24,6 +24,7 @@ const initializeDataFile = () => {
         title: 'Welcome to the Content Management System',
         description: 'This is a sample content item that will persist even after server restart.',
         imageUrl: null,
+        imageBase64: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       }
@@ -58,21 +59,8 @@ const writeContentToFile = (content) => {
 // Initialize data file on server start
 initializeDataFile();
 
-// Create uploads directory
-if (!fs.existsSync('uploads')) {
-  fs.mkdirSync('uploads', { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads');
-  },
-  filename: (req, file, cb) => {
-    const uniqName = `${uuidv4()}-${file.originalname}`;
-    cb(null, uniqName);
-  }
-});
-
+// ✅ Configure multer for memory storage (base64 conversion)
+const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
   fileFilter: (req, file, cb) => {
@@ -82,7 +70,7 @@ const upload = multer({
       cb(new Error('Only image files are allowed!'), false);
     }
   },
-  limits: { fileSize: 5 * 1024 * 1024 }
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 });
 
 // ✅ Multer error handling middleware
@@ -110,12 +98,11 @@ app.get('/', (req, res) => {
     success: true,
     message: '🚀 CMS Backend API is running!',
     version: '1.0.0',
+    storage: 'Base64 Image Storage',
     endpoints: {
       health: '/api/health',
       content: '/api/content',
-      uploads: '/uploads'
-    },
-    documentation: 'Use /api/health to check server status'
+    }
   });
 });
 
@@ -124,34 +111,22 @@ app.get('/api/health', (req, res) => {
   const content = readContentFromFile();
   res.json({ 
     success: true, 
-    message: 'Server is running with permanent storage',
+    message: 'Server is running with Base64 image storage',
     timestamp: new Date().toISOString(),
     totalItems: content.length,
     environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// ✅ Get all content - FROM FILE
+// ✅ Get all content
 app.get('/api/content', (req, res) => {
   try {
     const content = readContentFromFile();
     
-    // ✅ FIX: Ensure image URLs are properly formatted for production
-    const contentWithFixedUrls = content.map(item => {
-      if (item.imageUrl && !item.imageUrl.startsWith('http')) {
-        // Convert relative paths to absolute URLs
-        return {
-          ...item,
-          imageUrl: `${req.protocol}://${req.get('host')}${item.imageUrl}`
-        };
-      }
-      return item;
-    });
-
     res.json({
       success: true,
-      data: contentWithFixedUrls,
-      count: contentWithFixedUrls.length
+      data: content,
+      count: content.length
     });
   } catch (error) {
     res.status(500).json({
@@ -161,11 +136,11 @@ app.get('/api/content', (req, res) => {
   }
 });
 
-// ✅ Add new content - SAVE TO FILE (FIXED IMAGE URLS)
+// ✅ Add new content with Base64 image
 app.post('/api/content', upload.single('image'), (req, res) => {
   try {
     console.log('Request body:', req.body);
-    console.log('Request file:', req.file);
+    console.log('Request file received:', req.file ? `Size: ${req.file.size} bytes` : 'No file');
 
     const { title, description } = req.body;
     
@@ -186,13 +161,18 @@ app.post('/api/content', upload.single('image'), (req, res) => {
     // Read current content from file
     const currentContent = readContentFromFile();
 
-    // ✅ FIX: Use proper URL format for deployed environment
+    // ✅ Convert image to base64
+    const imageBase64 = req.file.buffer.toString('base64');
+    const imageMimeType = req.file.mimetype;
+
     const newItem = {
       id: uuidv4(),
       title: title.trim(),
       description: description.trim(),
-      // ✅ CORRECT: Use relative path that will be converted in GET endpoint
-      imageUrl: `/uploads/${req.file.filename}`,
+      imageBase64: `data:${imageMimeType};base64,${imageBase64}`,
+      imageUrl: null, // Keep for compatibility
+      mimeType: imageMimeType,
+      fileSize: req.file.size,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -210,16 +190,10 @@ app.post('/api/content', upload.single('image'), (req, res) => {
       });
     }
 
-    // ✅ Return the item with proper image URL for immediate use
-    const responseItem = {
-      ...newItem,
-      imageUrl: `${req.protocol}://${req.get('host')}${newItem.imageUrl}`
-    };
-
     res.json({
       success: true,
       message: 'Content added successfully!',
-      data: responseItem
+      data: newItem
     });
 
   } catch (error) {
@@ -231,51 +205,7 @@ app.post('/api/content', upload.single('image'), (req, res) => {
   }
 });
 
-// ✅ Fix ALL existing image URLs (run this once)
-app.post('/api/fix-image-urls', (req, res) => {
-  try {
-    const content = readContentFromFile();
-    console.log('Fixing image URLs for', content.length, 'items');
-    
-    let fixedCount = 0;
-    const fixedContent = content.map(item => {
-      if (item.imageUrl) {
-        // If it contains local IP, convert to relative path
-        if (item.imageUrl.includes('10.185.32.235') || item.imageUrl.includes('localhost')) {
-          const filename = item.imageUrl.split('/').pop();
-          fixedCount++;
-          return {
-            ...item,
-            imageUrl: `/uploads/${filename}`
-          };
-        }
-      }
-      return item;
-    });
-    
-    const writeSuccess = writeContentToFile(fixedContent);
-    
-    if (writeSuccess) {
-      res.json({
-        success: true,
-        message: `Fixed ${fixedCount} image URLs!`,
-        data: fixedContent
-      });
-    } else {
-      res.status(500).json({
-        success: false,
-        message: 'Failed to fix image URLs'
-      });
-    }
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error: ' + error.message
-    });
-  }
-});
-
-// ✅ Delete content - UPDATE FILE
+// ✅ Delete content
 app.delete('/api/content/:id', (req, res) => {
   try {
     const { id } = req.params;
@@ -287,7 +217,6 @@ app.delete('/api/content/:id', (req, res) => {
       });
     }
 
-    // Read current content from file
     const currentContent = readContentFromFile();
     const initialLength = currentContent.length;
     
@@ -300,7 +229,6 @@ app.delete('/api/content/:id', (req, res) => {
       });
     }
 
-    // Save updated content to file
     const writeSuccess = writeContentToFile(updatedContent);
 
     if (!writeSuccess) {
@@ -312,73 +240,13 @@ app.delete('/api/content/:id', (req, res) => {
 
     res.json({
       success: true,
-      message: 'Content deleted permanently!',
+      message: 'Content deleted successfully!',
       deletedId: id
     });
   } catch (error) {
     res.status(500).json({
       success: false,
       message: 'Error deleting content: ' + error.message
-    });
-  }
-});
-
-// ✅ Reset to sample data (optional endpoint)
-app.post('/api/reset', (req, res) => {
-  try {
-    const sampleData = [
-      {
-        id: '1',
-        title: 'Welcome to Content Management System',
-        description: 'This is permanent sample content. Your data survives server restarts!',
-        imageUrl: null,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      }
-    ];
-    
-    const writeSuccess = writeContentToFile(sampleData);
-    
-    if (writeSuccess) {
-      res.json({
-        success: true,
-        message: 'Reset to sample data successfully!',
-        data: sampleData
-      });
-    } else {
-      res.status(500).json({
-        success: false,
-        message: 'Failed to reset data'
-      });
-    }
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error resetting data: ' + error.message
-    });
-  }
-});
-
-// ✅ Get storage info
-app.get('/api/storage-info', (req, res) => {
-  try {
-    const content = readContentFromFile();
-    const stats = fs.statSync(DATA_FILE);
-    
-    res.json({
-      success: true,
-      data: {
-        totalItems: content.length,
-        fileSize: `${(stats.size / 1024).toFixed(2)} KB`,
-        storageFile: DATA_FILE,
-        lastModified: stats.mtime,
-        serverTime: new Date().toISOString()
-      }
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error getting storage info: ' + error.message
     });
   }
 });
@@ -397,22 +265,44 @@ app.get('/api/content/:id', (req, res) => {
       });
     }
 
-    // Ensure proper image URL
-    const itemWithFixedUrl = {
-      ...item,
-      imageUrl: item.imageUrl && !item.imageUrl.startsWith('http') 
-        ? `${req.protocol}://${req.get('host')}${item.imageUrl}`
-        : item.imageUrl
-    };
-
     res.json({
       success: true,
-      data: itemWithFixedUrl
+      data: item
     });
   } catch (error) {
     res.status(500).json({
       success: false,
       message: 'Error fetching content: ' + error.message
+    });
+  }
+});
+
+// ✅ Get storage info
+app.get('/api/storage-info', (req, res) => {
+  try {
+    const content = readContentFromFile();
+    const stats = fs.statSync(DATA_FILE);
+    
+    // Calculate total base64 image size
+    const totalImageSize = content.reduce((total, item) => {
+      return total + (item.fileSize || 0);
+    }, 0);
+
+    res.json({
+      success: true,
+      data: {
+        totalItems: content.length,
+        fileSize: `${(stats.size / 1024).toFixed(2)} KB`,
+        totalImageSize: `${(totalImageSize / 1024 / 1024).toFixed(2)} MB`,
+        storageFile: DATA_FILE,
+        storageType: 'Base64 in JSON',
+        lastModified: stats.mtime
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error getting storage info: ' + error.message
     });
   }
 });
@@ -424,36 +314,22 @@ app.use('*', (req, res) => {
     message: `Route not found: ${req.method} ${req.originalUrl}`,
     availableEndpoints: {
       GET: ['/', '/api/health', '/api/content', '/api/content/:id', '/api/storage-info'],
-      POST: ['/api/content', '/api/fix-image-urls', '/api/reset'],
+      POST: ['/api/content'],
       DELETE: ['/api/content/:id']
     }
-  });
-});
-
-// ✅ Global error handler
-app.use((error, req, res, next) => {
-  console.error('Unhandled error:', error);
-  res.status(500).json({
-    success: false,
-    message: 'Internal server error',
-    error: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
   });
 });
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   const content = readContentFromFile();
-  console.log(`🎯 CMS Backend Server running with PERMANENT STORAGE!`);
+  console.log(`🎯 CMS Backend Server running with BASE64 IMAGE STORAGE!`);
   console.log(`📍 Port: ${PORT}`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`📁 API Base: http://localhost:${PORT}/api`);
-  console.log(`📁 Uploads: http://localhost:${PORT}/uploads`);
   console.log(`💾 Storage: ${DATA_FILE} (${content.length} items loaded)`);
   console.log(`🔧 Available Endpoints:`);
   console.log(`   GET  /api/health          - Health check`);
   console.log(`   GET  /api/content         - Get all content`);
-  console.log(`   POST /api/content         - Add new content`);
+  console.log(`   POST /api/content         - Add new content (with Base64 image)`);
   console.log(`   DELETE /api/content/:id   - Delete content`);
-  console.log(`   POST /api/fix-image-urls  - Fix existing image URLs`);
-  console.log(`   GET  /api/storage-info    - Storage information`);
 });
