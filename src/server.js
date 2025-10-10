@@ -307,8 +307,8 @@ app.get('/api/storage-info', (req, res) => {
   }
 });
 
-// ✅ 404 handler for undefined routes
-app.use('*', (req, res) => {
+// ✅ FIXED: 404 handler for undefined routes
+app.use((req, res) => {
   res.status(404).json({
     success: false,
     message: `Route not found: ${req.method} ${req.originalUrl}`,
